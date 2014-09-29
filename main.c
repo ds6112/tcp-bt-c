@@ -3,9 +3,10 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
-#include <netinet/in.h>
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <netdb.h>
 #include "bencode.h"
 #include "helper.h"
@@ -15,14 +16,15 @@
 struct bencode *tor;
 struct bencode *announce;
 struct bencode *info;
+struct bencode *pieces;
 int main(int argc, char *argv[])
 {
 	// Initializations
 	char *a;
 	char a_url[BUFSIZ];
-	char domain[64];
-    int port;
-    char resource[128];
+	char a_domain[64];
+    int a_port;
+    char a_resource[128];
     size_t infoLen;
 	char info_hash_hex[40];
 	unsigned char info_hash[20];
@@ -45,6 +47,7 @@ int main(int argc, char *argv[])
 	// Get necessary data fields
 	tor 		= (struct bencode*) ben_decode(buffer,fsize);
 	info 		= (struct bencode*) ben_dict_get_by_str((struct bencode*)tor,"info");
+	pieces		= (struct bencode*) ben_dict_get_by_str((struct bencode*)info,"pieces");
 	announce 	= (struct bencode*) ben_dict_get_by_str((struct bencode*)tor,"announce");
 	a			= ben_print(announce);
 	
@@ -56,65 +59,76 @@ int main(int argc, char *argv[])
 	memmove (&a_url[strlen(a_url)-1], &a_url[strlen(a_url)], strlen (a_url)-(strlen(a_url)-1));
 
 	// Parse announce url
-    sscanf(a_url, "http://%63[^:]:%32d/%127[^\n]", domain, &port, resource);
+    sscanf(a_url, "http://%63[^:]:%32d/%127[^\n]", a_domain, &a_port, a_resource);
 
-	printf("%s\n",a_url);
-	
-	printf("%s\n",ben_print(info));
 	// Compute SHA1 info_hash
 	unsigned char *bencode_info = ben_encode(&infoLen,info);
 	sha1_compute(bencode_info,infoLen,info_hash);
 	free(bencode_info);
+
 	for(int i = 0; i<sizeof(info_hash); ++i)
   	{
     	sprintf(&info_hash_hex[i*2], "%02X", info_hash[i]);
  	}
-  	info_hash_hex[40]=0;
+	info_hash_hex[40]=0;
+
+  	// Get url encoded info hash
+	char info_hash_enc[BUFSIZ];
+	encode(info_hash, info_hash_enc);
+
 	printf("%s\n",info_hash_hex);
-	for(int i=0;i<sizeof(info_hash);++i)
-	{
-		printf("%c",info_hash[i]);
-	}
+	printf("%s\n",info_hash_enc);
     // Generate peer id
     char peer_id[21];
-    sprintf(peer_id, "-RU%04d-%012llu", 0001, random12());
-    printf("\n%s\n",peer_id);
+    sprintf(peer_id, "-RUBT11-%012llu",  random12());
+    printf("%s\n",peer_id);
 
-    // Get url encoded info hash
-	char info_hash_enc[sizeof(info_hash) * 3];
-	encode(info_hash, info_hash_enc);
-	printf("%s\n",info_hash_enc);
-	// Send
-	// Get peerlist
-	int sockfd;
+
+
+	// Setup socket
+	int sockfd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     struct sockaddr_in a_serv; 
-    struct hostent *hp = gethostbyname(domain);   
-	/*
-	char sendline[BUFSIZ + 1], recvline[BUFSIZ + 1];
-char* ptr;
+    struct hostent *hp;
+    // Check if we have a valid ip already
+    struct sockaddr_in tmp;
+    a_serv.sin_family = AF_INET;
+	a_serv.sin_port = htons(a_port);
+    if(!inet_pton(AF_INET, a_domain, &tmp.sin_addr))
+    {
+    	hp=gethostbyname(a_domain);
+    	if(hp==NULL)
+	    {
+	    	exit(1);
+	    } 
+	    memcpy(&a_serv.sin_addr, hp->h_addr_list[0], hp->h_length);
 
-size_t n;
+    }
+    else
+    {
+    	inet_pton(AF_INET,a_domain, &a_serv.sin_addr);
+	}
+    int uploaded = 0;
+    int downloaded =0;
+    int listen_port = 6881;
+    int left;
+    printf("%i\n",strlen(ben_print(pieces)));
 
-/// Form request
-snprintf(sendline, 200, 
-     "GET %s HTTP/1.0\r\n"  // POST or GET, both tested and works. Both HTTP 1.0 HTTP 1.1 works, but sometimes 
-     "Host: %s\r\n"     // but sometimes HTTP 1.0 works better in localhost type
-     "Content-type: application/x-www-form-urlencoded\r\n"
-     "Content-length: %d\r\n\r\n"
-     "%s\r\n", info_hash_hex, a_url, (unsigned int)strlen(info_hash_enc), info_hash_enc);
-printf("%s\n",sendline);
 	
-	  char *query;
-  char *getpage = page;
-  char *tpl = "GET /%s HTTP/1.0\r\nHost: %s\r\nUser-Agent: %s\r\n\r\n";
-  if(getpage[0] == '/'){
-    getpage = getpage + 1;
-    fprintf(stderr,"Removing leading \"/\", converting %s to %s\n", page, getpage);
-  }
-  // -5 is to consider the %s %s %s in tpl and the ending \0
-  query = (char *)malloc(strlen(host)+strlen(getpage)+strlen(USERAGENT)+strlen(tpl)-5);
-  sprintf(query, tpl, getpage, host, USERAGENT);
-  return query;
-  */
+	if (connect(sockfd, (struct sockaddr *)&a_serv, sizeof(a_serv) )) 
+	{
+      exit(1);
+  	}
+
+  	char *USERAGENT = "Mozilla/5.0";
+  	char *tpl = "GET /%s HTTP/1.1\r\nHost: %s\r\nUser-Agent: %s\r\n\r\n";
+  	// -5 is to consider the %s %s %s in tpl and the ending \0
+  	char *query = (char *)malloc(strlen(a_domain)+strlen(a_resource)+strlen(USERAGENT)+strlen(tpl)-5);
+  	sprintf(query, tpl, a_resource, a_domain, USERAGENT);
+  	send(sockfd,query,strlen(query),0);
+  	char recvbuf[BUFSIZ];
+  	recv(sockfd,recvbuf,BUFSIZ,0);
+  	printf("%s\n",recvbuf);
+  	
+
 	return 0;
 }
